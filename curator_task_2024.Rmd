@@ -1,0 +1,396 @@
+---
+title: "Curator Task 2024"
+author: "Fernando Pardo"
+date: "2024-10-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+library("tidyverse")
+library("readxl")
+library("stringi")
+```
+
+## Introducción
+
+En este documento desarrollaré el "Curator Task 2024". Decidí hacer este
+documento como un RMD porque, en mi opinión, de esta manera se facilita la
+presentación. Estoy consciente que para un trabajo formal el código debe estar
+modularizado.
+
+## Definiendo funciones de interés
+
+```{r funciones}
+estandariza_strings <- function(vec){
+# Función auxiliar para estandarizar lo más posible strings escritos de manera
+# distinta: dado un vector de strings, a cada una de sus entradas la función le
+# aplica lo siguiente:
+# 1. lo pasa a minúsculas.
+# 2. Le elimina espacios vacíos al principio y al final.
+# 3. Le quita acentos a vocales y cambia "ñ" por "ni".
+# 4. Cambia: comas, puntos, dos puntos, puntos y comas, diagonales, símbolos de
+# interrogación, admiración, paréntesis, guiones altos, porcentajes y espacios
+# vacíos por guiones bajos
+# 5. Después del procedimiento anterior, si encuentra dos o más guines bajos pegados
+# los colapsa en uno solo
+# vec: vector de strings a estandarizar
+# La función regresa un vector de la misma longitud que vec, pero habiéndole
+# aplicado el procedimiento anterior.
+  resultado <- vec |>
+    tolower() |>
+    stri_trim_both() |>
+    stri_replace_all_coll(
+      c("á","é","í","ó","ú","ñ",",",".",":",";","/","¿","?","¡","!","(",")","-","%"," "),
+      c("a","e","i","o","u","ni","_","_","_","_","_","_","_","_","_","_","_","_","_","_"),
+      vectorize_all = FALSE) |>
+    stri_replace_all_regex("_+", "_")
+  
+  return(resultado)
+}
+```
+
+## Definiendo los paths que se utilizarán
+
+```{r paths}
+# El working directory debe apuntar al directorio donde se encuentra almacenado
+# este script
+carpeta_datos_crudos <- "data_raw"
+archivo_datos_crudos_1 <- "raw_data1.xlsx"
+archivo_datos_crudos_2 <- "raw_data2.xlsx"
+archivo_catalogo_bentos <- "benthos_functional_groups.csv"
+
+# Archivo donde se guardará la base de datos integrados
+archivo_datos_agregados <- "aggregated_data.rds"
+
+# Datos de referencia
+carpeta_datos_ref <- "data_intermediate"
+archivo_datos_ref <- "data_intermediate_example.rds"
+
+path_datos_crudos_1 <- file.path(carpeta_datos_crudos, archivo_datos_crudos_1)
+path_datos_crudos_2 <- file.path(carpeta_datos_crudos, archivo_datos_crudos_2)
+path_datos_ref <- file.path(carpeta_datos_ref, archivo_datos_ref)
+path_catalogo_bentos <- archivo_catalogo_bentos
+path_datos_agregados <- archivo_datos_agregados
+```
+
+## Leyendo los datos a integrar y generando el catálogo
+
+```{r lectura, message=FALSE}
+datos_1 <- read_excel(path_datos_crudos_1)
+# glimpse(datos_1)
+# summary(datos_1)
+datos_2 <- read_excel(path_datos_crudos_2)
+# glimpse(datos_2)
+# summary(datos_2)
+
+datos_ref <- readRDS(path_datos_ref)
+# glimpse(datos_ref)
+# summary(datos_ref)
+```
+
+```{r catalogo, message=FALSE}
+catalogo_bentos <- read_csv(path_catalogo_bentos, show_col_types=FALSE) |>
+  pivot_longer(!Functional_group_correct, names_to="nombre", values_to="valor") |>
+  filter(!is.na(valor)) |>
+  select(
+    Grupo_funcional = Functional_group_correct,
+    Taxa = valor)
+# View(catalogo_bentos)
+```
+
+Ví que el catálogo tiene taxas duplicadas bajo distintos grupos funcionales.
+Por ejemplo, Sand aparece bajo arena y roca. Revisaré esto más en detalle:
+
+```{r catalogo_revision, message=FALSE}
+catalogo_bentos |>
+  group_by(Taxa) |>
+  summarise(n=n()) |>
+  arrange(desc(n)) |>
+  head()
+```
+
+Efectivamente así es. Por facilidad, asignaré cada taxa al primer grupo funcional
+del que forma parte.
+
+```{r catalogo_final, message=FALSE}
+catalogo_bentos_revisado <- catalogo_bentos |>
+  group_by(Taxa) |>
+  summarise(Grupo_funcional = first(Grupo_funcional)) |>
+  select(Grupo_funcional, Taxa) |>
+  
+  # Corrigiendo un pequeño error
+  mutate(
+    Taxa = ifelse(Taxa == "Ruubble", "Rubble", Taxa)
+  ) |>
+  # Agregando el Taxa "Otros"
+  union(
+    tibble("Taxa" = "Otros", "Grupo_funcional" = "Otros"))
+```
+
+## 1. Limpieza de datos crudos
+
+El resultado de este paso será hacer que los datos crudos tengan la misma
+estructura que los datos de referencia
+
+```{r limpieza_datos_crudos, message=FALSE}
+# Revisando las columnas, estandarizando los nombres lo más posible
+columnas_1 <- colnames(datos_1) |>
+  estandariza_strings() |>
+  # Quitando los guiones bajos al inicio de cada nombre, introducidos por la
+  # función anterior
+  stri_replace_all_regex("_([a-zA-Z]+)", "$1")
+print(columnas_1)
+
+columnas_2 <- colnames(datos_2) |>
+  estandariza_strings() |>
+  stri_replace_all_regex("_([a-zA-Z]+)", "$1")
+print(columnas_2)
+
+columnas_ref <- colnames(datos_ref)
+print(columnas_ref)
+```
+
+### Homologación base de datos 1
+
+```{r revision_datos_1, message=FALSE}
+
+# Haciendo algunas revisiones de interés
+datos_1 |>
+  mutate(
+    Year = year(DATE)
+  ) |>
+  group_by(YEAR, Year) |>
+  summarise(n=n())
+# Coinciden los años en la columna "DATE" con los de la columna "Year"
+
+# Sospecho que las columnas de:
+# `% BRAN` - `% Pocillopora`,
+# `% MASS` - `% Pavona`,
+# `% ENCO` - `% Psammocora` tienen que ver:
+
+#datos_1 |> filter(`% BRAN` != `% Pocillopora`)
+# `% BRAN` = `% Pocillopora` + `% Psammocora`
+
+#datos_1 |> filter(`% MASS` != `% Pavona`) 
+datos_1 |> filter(`% MASS` == `% Pavona`) |>
+  pull(`% ENCO`) |>
+  unique()
+# `% Pavona` es casi `% MASS` + `% ENCO`
+```
+
+```{r homologacion_datos_1}
+
+# Homologando la base de datos 1
+datos_1_homologado <- datos_1 |>
+  transmute(
+    Region = NA_character_,
+    Country = NA_character_,
+    Location = NA_character_,
+    Lat = NA, # Importante
+    Long = NA, # Importante,
+    Site = ifelse(SITE=="sitio1", "site1", "site2"), # Reemplazando español
+    
+    # El Site_id, como está especificado en las instrucciones, es una llave del
+    # sitio (no de un muestreo de sitio en una fecha particular)
+    Site_id = paste(Region, Country, Location, Site, sep="_"),
+    Day = day(DATE),
+    Month = as.integer(month(DATE)),
+    Year = as.character(year(DATE)), # Elegí usar los años de "DATE"
+    Observer = NA_character_,
+    Dataset_id = paste("raw_data1_example", min(Year), max(Year), "zapataf", sep="_"),
+    Sampling_method = NA_character_, # Importante
+    Depth = DEPTH,
+    Transect = TRANSECT,
+    Size_transect = NA,
+    Transect_id = paste(Site_id, Day, Month, Year, Observer, Depth, Transect, sep="_"),
+    Quadrant = NA,
+    Size_quadrant = NA,
+    Temp = NA,
+    Rock = `% ROCK`,
+    Boulders = `% BOUL`,
+    Rubble = `% RUBB`,
+    Sand = `% SAND`,
+    Dead_coral = `% DCOR`,
+    # BRAN, MASS y ENCO creo que son características de los corales
+    Fleshy_algae = `% FALG`,
+    Turfing_algae = `% TALG`,
+    Cyanobacteria = `% CYAN`,
+    Calcareous_algae = `% CALG`,
+    Encrusting_calcareous_algae = `% EALG`,
+    Otros = `% OTHR`,
+    Gardineroseris = `% Gardineroseris`,
+    Pavona = `% Pavona`,
+    Pocillopora = `% Pocillopora`,
+    Psammocora = `% Psammocora`
+  )
+
+datos_1_homologado |> nrow()
+datos_1_homologado$Transect_id |> unique() |> length()
+# Transect_id es una llave de "datos_1_homologado", por lo que la puedo usar
+# para la revisión
+
+# Revisando que la suma de los porcentajes sea igual a 100:
+datos_1_homologado |>
+  rowwise() |>
+  mutate(
+    suma_porcentajes = sum(c_across(Rock:Psammocora))
+  ) |>
+  select(suma_porcentajes) |>
+  summary()
+# Las sumas se ven bien, por errores de redondeo no dan exactamente 100%
+
+datos_1_final <- datos_1_homologado |>
+  pivot_longer(cols = Rock:Psammocora, names_to="Taxa", values_to="Value") |>
+  
+  # Eliminando filas correspondientes a especies ausentes
+  filter(Value != 0) |>
+  
+  # Haciendo el join con el catálogo de bentos
+  inner_join(catalogo_bentos_revisado, by = join_by(Taxa)) |>
+  
+  # Cambiando de nombre la columna de Grupo_funcional
+  rename(
+    Functional_group = Grupo_funcional
+  ) 
+```
+
+### Homologación base de datos 2
+
+```{r revision_datos_2, message=FALSE}
+
+# Haciendo algunas revisiones de interés
+datos_2 |>
+  group_by(Year, Reef, Site) |>
+  summarise(n=n()) |>
+  arrange(n)
+# No todos los sitios tienen todos los transectos
+
+# Sospecho que `Total live coral` == Pavona + Pocillopora + Psammocora:
+datos_2 |>
+  filter(`Total live coral` != Pavona + Pocillopora + Psammocora)
+# Perfecto!
+```
+```{r homologacion_datos_2}
+
+# Homologando la base de datos 2
+datos_2_homologado <- datos_2 |>
+  transmute(
+    Region = NA_character_,
+    Country = NA_character_,
+    
+    # Decidí guardar en location la información del arrecife para no perderla
+    Location = paste(Reef, Reef_zone, sep="_"),
+    
+    Lat = NA, # Importante
+    Long = NA, # Importante,
+    
+    Site = tolower(Site),
+    Site_id = paste(Region, Country, Location, Site, sep="_"),
+    Day = as.integer(Day),
+    Month = as.integer(Month),
+    Year = Year, # Elegí usar los años de "DATE"
+    Observer = NA_character_,
+    Dataset_id = Dataset_id,
+    Sampling_method = NA_character_, # Importante
+    Depth = Depth,
+    Transect = Transect,
+    Size_transect = NA,
+    Transect_id = paste(Site_id, Day, Month, Year, Observer, Depth, Transect, sep="_"),
+    Quadrant = NA,
+    Size_quadrant = NA,
+    Temp = NA,
+    Rock = ROCK,
+    Rubble = RUBB,
+    Sand = SAND,
+    Dead_coral = DCOR,
+    # BRAN, MASS creo que son características de los corales
+    Fleshy_algae = FALG,
+    Turfing_algae = TALG,
+    Cyanobacteria = CYAN,
+    Calcareous_algae = CALG,
+    Encrusting_calcareous_algae = EALG,
+    Encrusting_sponges = ENSP,
+    Pavona = Pavona,
+    Pocillopora = Pocillopora,
+    Psammocora = Psammocora
+  )
+
+datos_2_homologado |> nrow()
+datos_2_homologado$Transect_id |> unique() |> length()
+# Transect_id es una llave de "datos_1_homologado", por lo que la puedo usar
+# para la revisión
+
+# Revisando que la suma de los porcentajes sea igual a 100:
+datos_2_homologado |>
+  rowwise() |>
+  mutate(
+    suma_porcentajes = sum(c_across(Rock:Psammocora))
+  ) |>
+  arrange(suma_porcentajes) |>
+  select(suma_porcentajes) |>
+  summary()
+# Las sumas se ven bien, por errores de redondeo no dan exactamente 100%
+
+datos_2_final <- datos_2_homologado |>
+  pivot_longer(cols = Rock:Psammocora, names_to="Taxa", values_to="Value") |>
+  
+  # Eliminando filas correspondientes a especies ausentes
+  filter(Value != 0) |>
+  
+  # Haciendo el join con el catálogo de bentos
+  inner_join(catalogo_bentos_revisado, by = join_by(Taxa)) |>
+  
+  # Cambiando de nombre la columna de Grupo_funcional
+  rename(
+    Functional_group = Grupo_funcional
+  )
+```
+
+## Uniendo ambas bases de datos
+
+```{r union_bases}
+datos_agregados <- datos_1_final |>
+  union(datos_2_final)
+
+saveRDS(datos_agregados, path_datos_agregados)
+```
+
+```{r revision_base_integrada}
+# Revisando número de datos
+nrow(datos_1_final) + nrow(datos_2_final) == nrow(datos_agregados)
+# TRUE
+```
+
+## Comentarios finales
+
+Utilizando este script, se integraron las bases de datos
+"`r archivo_datos_crudos_1`" y "`r archivo_datos_crudos_2`" en el formato deseado
+("`r archivo_datos_ref`"). El archivo resultante se encuentra en:
+"`r path_datos_agregados`"
+
+Cabe destacar que las bases integradas tenían los siguientes campos importantes
+vacíos:
+
+- Lat
+- Long
+- Sampling_method
+
+Además, los siguientes campos no prioritarios también se encontraban vacíos:
+
+- Region
+- Country
+- Location (en el caso de la base "raw_data2.xlsx", aproveché la información en
+  "Reef" y "Reef_zone" para asignarla)
+- Observer
+- Size_transect
+- Quadrant
+- Size_quadrant
+- Temperature
+
+Finalmente, en el catálogo se podían encontrar algunos valores de "Taxa"
+asociados a más de un "Grupo_funcional", por lo que se eligió el primero en
+aparición para evitar la aparición de registros duplicados.
